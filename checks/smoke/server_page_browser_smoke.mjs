@@ -9,7 +9,9 @@
 // milliseconds late, which moves Silero VAD's chunks of 32 ms over the speech, and the regions and the text with them;
 // the file delayed by 4 to 28 ms gave reazonspeech-nemo-v2 F16 texts 8.7 to 17.4% CER from the undelayed one's (Apple
 // M5, Metal, 2026-10-12). The audio is
-// 16-bit WAVE made of the dumps of reference/fastconformer/dump.py or reference/qwen3-asr/dump.py. With --dialogue and a
+// 16-bit WAVE made of the dumps of reference/fastconformer/dump.py or reference/qwen3-asr/dump.py. The talk panel's view
+// is given the model's audio and text with a pause between them, and shows the full stop said after the pause as the end
+// of the utterance before it. With --dialogue and a
 // dialogue model, which the server is given beside the recognition model, the talk panel holds a conversation that hears
 // the same microphone, with the model speaking first: its settings folded away while it runs, beads in both lanes, the
 // model's text and its name, the microphone's audio sent as it plays, and the server's log of a conversation hung up.
@@ -424,6 +426,33 @@ try {
   }
   console.log(`live: ${(spoken.length / rate).toFixed(1)} s from the microphone, sent from ${(lag / pcmRate).toFixed(3)} s on with `
               + `the largest difference ${largest.toFixed(0)} steps of 16-bit PCM, grey text in ${live.grey} of its looks, the API's text for the audio sent: ${live.text.slice(0, 40)}`);
+  // The model's text an utterance at a time, on a copy of the talk panel's stage: the full stop the model writes with its
+  // audio after a pause ends the utterance before it, rather than starting the next.
+  const utterances = await page(`
+    const { TalkView } = await import('/page/talk-view.js');
+    const stage = $('talk-stage').cloneNode(true);
+    stage.removeAttribute('id');
+    document.body.append(stage);
+    const view = new TalkView(stage);
+    view.start('Haru');
+    view.stop();
+    const rate = 24000;
+    const tone = (seconds) => Float32Array.from({ length: seconds * rate }, (_, i) => 0.3 * Math.sin(i / 10));
+    const t = TalkView.now() - 10;
+    view.said(tone(0.5), rate, t, 'Hmm');
+    view.said(new Float32Array(1.5 * rate), rate, t + 0.5, '');
+    view.said(tone(0.5), rate, t + 2, '. Well,');
+    view.said(tone(0.5), rate, t + 2.5, ' it rains.');
+    await new Promise((r) => setTimeout(r, 100));
+    const lines = [...stage.querySelectorAll('.talk-text .talk-line')].map((line) => line.textContent);
+    stage.remove();
+    return lines;
+  `);
+  if (JSON.stringify(utterances) !== JSON.stringify(['Hmm.', 'Well, it rains.'])) {
+    throw new Error(`the talk panel's utterances: ${JSON.stringify(utterances)}, where "Hmm", a pause and ". Well, it rains." were said`);
+  }
+  console.log(`talk: a full stop said after a pause ends the utterance before it: ${JSON.stringify(utterances)}`);
+
   if (dialogue) {
     // A hang-up while the microphone's permission is unanswered stops the conversation the start began, which would
     // otherwise hold the server's one conversation until the browser answered.
