@@ -21,6 +21,8 @@ const FLOOR_TIMES = 2.5;
 const FULL = 0.3;
 /** The pause in the model's audio after which its next text starts a new utterance. */
 const PAUSE_SECONDS = 1.2;
+/** The punctuation at the start of a text that closes what was said before it. */
+const CLOSING = /^\s*[.,!?;:…。、！？，；：」』）)\]]*/u;
 
 /** The audio of one side: the peak of each 50 ms of it, at the time its end is heard. */
 class Lane {
@@ -184,17 +186,24 @@ export class TalkView {
   said(samples, rate, time, text) {
     this.#model.add(samples, rate, time);
     if (!text) return;
-    // A pause in the model's speech before this text, or a while without text, starts a new utterance.
+    // A pause in the model's speech before this text, or a while without text, starts a new utterance. The model often
+    // writes the punctuation that ends a sentence with the audio after a pause, which ends the utterance before it.
     const paused = !this.#model.heardSince(time - PAUSE_SECONDS, time) || time - this.#lastText > PAUSE_SECONDS * 2;
-    if (paused || this.#said.length === 0) this.#said.push('');
-    this.#said[this.#said.length - 1] += text;
+    if (paused || this.#said.length === 0) {
+      const closing = this.#said.length ? CLOSING.exec(text)[0] : '';
+      if (closing) this.#said[this.#said.length - 1] += closing;
+      this.#said.push(text.slice(closing.length));
+    } else {
+      this.#said[this.#said.length - 1] += text;
+    }
     this.#lastText = time;
     // The text shows when its audio plays.
     setTimeout(() => this.#showText(), Math.max(0, (time - TalkView.now()) * 1000));
   }
 
   #showText() {
-    const shown = this.#said.slice(-2);
+    // An utterance whose text so far was the punctuation of the one before it has nothing to show yet.
+    const shown = this.#said.filter((utterance) => utterance.trim()).slice(-2);
     const lines = shown.map((utterance, i) => {
       const line = document.createElement('p');
       line.className = i === shown.length - 1 ? 'talk-line current' : 'talk-line';
