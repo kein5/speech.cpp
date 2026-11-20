@@ -210,6 +210,11 @@ public:
     struct Begun {
         double start;
         bool kept;
+        /**
+         * Where the region under way ends, padded, if the silence that has begun lasts and no region follows within twice
+         * the padding; none while someone speaks, or where the region would be too short to be given.
+         */
+        std::optional<double> quiet_end;
     };
 
     /**

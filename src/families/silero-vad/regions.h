@@ -36,6 +36,12 @@ struct Region {
 struct Begun {
     int64_t start;
     bool kept;
+    /**
+     * The padded end of the region under way where its probability has fallen below neg_threshold, as it is given if the
+     * silence lasts min_silence_duration_ms and no region starts within twice speech_pad_ms of it; none while it has not
+     * fallen, and for a region too short to be given if it ends there.
+     */
+    std::optional<int64_t> quiet_end;
 };
 
 /**

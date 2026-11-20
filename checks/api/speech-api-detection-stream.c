@@ -7,7 +7,8 @@
  * detection says is kept must be a region's, and stay kept while it is said; with min_speech_duration_ms 0, every start it
  * says someone speaks from must be a region's, kept from when it is first said; and with pieces of one sample,
  * min_silence_duration_ms of at least twice speech_pad_ms and no max_speech_duration_s, every region given before the end
- * must have had its start said before it was given. Two detections on one model pushed in turn must each give
+ * must have had its start said before it was given, and its end said, by speech_detection_quiet(), before it was given.
+ * Two detections on one model pushed in turn must each give
  * their own regions. Then it times a minute of audio in pieces of 20 ms, 100 ms and 1 s, and checks what a detection
  * refuses.
  */
@@ -107,6 +108,10 @@ typedef struct {
     int n_said;
     double said[MAX_SAID];
     size_t said_at[MAX_SAID], kept_at[MAX_SAID];
+    /** Each end speech_detection_quiet() said a region would take, with the samples pushed when it first said it. */
+    int n_quiet;
+    double quiet[MAX_SAID];
+    size_t quiet_at[MAX_SAID];
 } Streamed;
 
 /** Reads what `d` gives after `at` samples have been pushed; 0 when it gives more regions than the check holds. */
@@ -118,6 +123,11 @@ static int record(const speech_detection * d, Streamed * s, size_t at) {
         s->given_at[i] = at;
     }
     s->regions.count = (int) count;
+    double end = 0;
+    if (speech_detection_quiet(d, &end) && (s->n_quiet == 0 || s->quiet[s->n_quiet - 1] != end) && s->n_quiet < MAX_SAID) {
+        s->quiet[s->n_quiet] = end;
+        s->quiet_at[s->n_quiet++] = at;
+    }
     double start = 0;
     int kept = 0;
     if (!speech_detection_speaking(d, &start, &kept)) return 1;
@@ -167,7 +177,7 @@ static int stream(speech_model * model, const float * x, size_t n, int rate, con
         ok = speech_detection_region(d, (size_t) i, &a, &b) == SPEECH_OK && a == s->regions.start[i] && b == s->regions.end[i];
         if (!ok) fprintf(stderr, "FAIL: region %d changed after it was given\n", i);
     }
-    ok = ok && !speech_detection_speaking(d, NULL, NULL);
+    ok = ok && !speech_detection_speaking(d, NULL, NULL) && !speech_detection_quiet(d, NULL);
     speech_detection_free(d);
     return ok;
 }
@@ -208,6 +218,12 @@ static int said_well(const Streamed * s, size_t n, int min_speech_zero, int said
         for (int j = 0; !found && j < s->n_said; j++) found = s->said[j] == s->regions.start[i] && s->said_at[j] < s->given_at[i];
         if (!found && s->given_at[i] <= n) {
             fprintf(stderr, "FAIL: the region from %.6f s was given before anyone was said to speak from its start\n", s->regions.start[i]);
+            return 0;
+        }
+        found = 0;
+        for (int j = 0; !found && j < s->n_quiet; j++) found = s->quiet[j] == s->regions.end[i] && s->quiet_at[j] < s->given_at[i];
+        if (!found && s->given_at[i] <= n) {
+            fprintf(stderr, "FAIL: the region to %.6f s was given before its end was said to be quiet\n", s->regions.end[i]);
             return 0;
         }
     }
@@ -264,7 +280,7 @@ static int check_refusals(speech_model * model, const float * x, size_t n, int r
           expect(speech_detect(r), SPEECH_OK, NULL, "the request a detection was started from");
     speech_request_free(r);
     speech_detection_free(NULL);
-    ok &= speech_detection_region_count(NULL) == 0 && speech_detection_speaking(NULL, NULL, NULL) == 0;
+    ok &= speech_detection_region_count(NULL) == 0 && speech_detection_speaking(NULL, NULL, NULL) == 0 && speech_detection_quiet(NULL, NULL) == 0;
     return ok ? 0 : 1;
 }
 

@@ -295,6 +295,10 @@ deltas carry the beginning that two of these readings in a row agree on. They ma
 from it where a later reading changed its mind: a client shows them while someone speaks and replaces them with the
 completed `transcript`, as it does for OpenAI's `gpt-live-transcribe`. With Qwen3-ASR, each reading and the completed
 `transcript` are given the reading before as their `draft`, which makes them sooner where the text stays the same.
+With `server_vad`, once the speech has fallen quiet for `prefix_padding_ms`, the utterance's audio to the end it takes if
+the silence lasts is recognized while the silence goes on, and an utterance that ends there completes with that
+recognition as soon as it is committed: the same audio, and the same `transcript`, without the wait for its
+recognition. Speech that resumes drops it.
 
 Utterances are transcribed one after another, each in its turn among the server's other transcriptions, taken when it
 is committed. A session holds at most 25 MB of audio not yet transcribed, in its buffer or committed, which is 546 s;

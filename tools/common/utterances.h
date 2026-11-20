@@ -139,6 +139,11 @@ public:
      * speech_detection_speaking() gives them, or nothing.
      */
     std::optional<std::pair<double, bool>> speaking() const;
+    /**
+     * Where the region under way ends, padded, if the silence that has begun lasts, as speech_detection_quiet() gives it,
+     * or nothing.
+     */
+    std::optional<double> quiet_end() const;
     /** Starts again, on the audio that follows, with the same model and options. */
     void restart();
 
@@ -230,6 +235,27 @@ private:
         std::string sent;
     };
 
+    /**
+     * A recognition of the utterance under way started before its region is certain: once the detection says the region
+     * has fallen quiet and its audio has reached the end it then takes, that audio is recognized as its commit would
+     * recognize it, while the silence that makes the region certain goes on. The commit of a region that ends there
+     * takes its result; speech that resumes, or a region that ends elsewhere, drops it.
+     */
+    struct Early {
+        uint64_t number = 0;
+        /** The samples it recognizes: the region's first and the one after its last, counted from the start of the audio. */
+        uint64_t first = 0, last = 0;
+        /** Its samples until the worker takes them, the draft and what is asked, as a commit's. */
+        std::vector<float> samples;
+        std::string draft;
+        Asked asked;
+        /** Whether the worker has taken it, and whether it has ended, with its text or what it threw. */
+        bool started = false, done = false;
+        std::optional<Transcript> transcript;
+        std::exception_ptr failure;
+        std::shared_ptr<Cancellation> cancellation;
+    };
+
     /** A committed utterance that waits for its recognition, with its place or what refused it one. */
     /** A diarization as the utterances committed while it goes on read it. */
     struct Diarized {
@@ -257,6 +283,8 @@ private:
         std::unique_ptr<Reservation> enhancement;
         std::unique_ptr<Reservation> reservation;
         std::exception_ptr refused;
+        /** The recognition begun before the commit whose result completes it, in place of a recognition of its own. */
+        std::shared_ptr<Early> early;
     };
 
     void work();
@@ -283,6 +311,10 @@ private:
     void restart_detection();
     void begin_manual_utterance();
     bool reading_due() const;
+    bool early_due() const;
+    /** Starts an early recognition of the utterance under way where the detection says it has fallen quiet. */
+    void begin_early(uint64_t last);
+    void drop_early();
     void send(const Event & e);
 
     Recognizer & recognizer_;
@@ -313,6 +345,7 @@ private:
     size_t regions_ = 0;
     uint64_t next_ = 0;
     std::optional<Utterance> current_;
+    std::shared_ptr<Early> early_;
     std::deque<Final> finals_;
     std::deque<Waiting> waiting_;
     /** Whether the worker recognizes, an utterance or the beginning of one. */

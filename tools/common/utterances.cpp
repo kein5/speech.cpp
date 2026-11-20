@@ -91,6 +91,12 @@ std::optional<std::pair<double, bool>> Detection::speaking() const {
     return std::make_pair(start, kept != 0);
 }
 
+std::optional<double> Detection::quiet_end() const {
+    double end = 0;
+    if (!speech_detection_quiet(detection_.get(), &end)) return std::nullopt;
+    return end;
+}
+
 Assembly::Assembly(Recognizer & recognizer, int rate, std::function<void(const Event &)> emit, Enhancer * enhancer)
     : recognizer_(recognizer), enhancer_(enhancer), rate_(rate), emit_(std::move(emit)) {
     worker_ = std::thread([this] { work(); });
@@ -104,6 +110,7 @@ Assembly::~Assembly() {
         waiting_.clear();
         if (reading_) reading_->cancel();
         if (final_) final_->cancel();
+        drop_early();
     }
     changed_.notify_all();
     worker_.join();
@@ -115,6 +122,7 @@ void Assembly::ask(std::optional<Asked> asked) {
     // Readings asked otherwise would not agree as two readings of the same request do.
     if (reading_) reading_->cancel();
     if (current_) current_->last_reading.clear();
+    drop_early();
     changed_.notify_all();
 }
 
@@ -126,6 +134,7 @@ void Assembly::detect(std::unique_ptr<Detection> detection) {
     // audio that follows are utterances of their own.
     if (manual_ && current_) {
         if (reading_) reading_->cancel();
+        drop_early();
         current_.reset();
     }
     manual_ = false;
@@ -208,6 +217,7 @@ bool Assembly::commit() {
 void Assembly::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (reading_) reading_->cancel();
+    drop_early();
     current_.reset();
     keep_from(heard_);
     if (detection_) restart_detection();
@@ -270,6 +280,40 @@ void Assembly::take_regions() {
     if (!current_) current_ = Utterance{next_++, start, false, start, "", "", ""};
     keep_from(start);
     if (speaking->second) announce(*current_);
+    // Where the region has fallen quiet, its audio to the end it then takes is recognized while the silence goes on.
+    const std::optional<double> quiet = current_->announced ? detection_->quiet_end() : std::nullopt;
+    if (!quiet) {
+        if (early_) drop_early();
+        return;
+    }
+    // The end lies in audio not yet heard until the silence has lasted the padding; at() would stop it at the audio heard.
+    if (*quiet * rate_ > (double) pushed_) return;
+    const uint64_t last = at(*quiet);
+    if (last <= current_->start || last > heard_) return;
+    if (early_ && early_->number == current_->number && early_->last == last) return;
+    begin_early(last);
+}
+
+void Assembly::begin_early(uint64_t last) {
+    drop_early();
+    // An utterance enhanced before its recognition is recognized once it is committed, as before.
+    if (!asked_ || asked_->enhance) return;
+    auto early = std::make_shared<Early>();
+    early->number = current_->number;
+    early->first = current_->start;
+    early->last = last;
+    early->samples.assign(audio_.begin() + (long) (early->first - buffer_), audio_.begin() + (long) (last - buffer_));
+    early->draft = current_->last_reading;
+    early->asked = *asked_;
+    if (reading_) reading_->cancel();
+    early_ = std::move(early);
+    changed_.notify_all();
+}
+
+void Assembly::drop_early() {
+    if (!early_) return;
+    if (early_->cancellation) early_->cancellation->cancel();
+    early_.reset();
 }
 
 void Assembly::announce(Utterance & u) {
@@ -300,6 +344,12 @@ void Assembly::commit_samples(uint64_t number, uint64_t first, uint64_t last) {
     committed.recognized = asked_.has_value();
     send(committed);
     if (reading_) reading_->cancel();
+    // A recognition begun early completes the commit of the same audio; any other is dropped.
+    std::shared_ptr<Early> early = std::move(early_);
+    if (early && !(early->started && early->number == number && early->first == first && early->last == last)) {
+        if (early->cancellation) early->cancellation->cancel();
+        early.reset();
+    }
     if (asked_) {
         Final f;
         f.number = number;
@@ -311,6 +361,16 @@ void Assembly::commit_samples(uint64_t number, uint64_t first, uint64_t last) {
             f.draft = current_->last_reading;
         }
         f.asked = *asked_;
+        if (early) {
+            f.early = std::move(early);
+            f.length = (size_t) (last - first);
+            committed_ += f.length;
+            finals_.push_back(std::move(f));
+            current_.reset();
+            keep_from(last);
+            changed_.notify_all();
+            return;
+        }
         // The recognition takes its place as the utterance is committed, so that it runs before what comes later, and its
         // enhancement, which runs before it, takes its own first.
         try {
@@ -342,6 +402,7 @@ void Assembly::drop_current() {
     // A region is announced once it is certain to be kept, so only one not yet announced can be dropped.
     if (current_->announced) throw std::logic_error("the detection dropped a region it was certain to keep");
     if (reading_) reading_->cancel();
+    drop_early();
     current_.reset();
 }
 
@@ -367,7 +428,13 @@ void Assembly::begin_manual_utterance() {
 }
 
 bool Assembly::reading_due() const {
+    // The utterance whose early recognition stands is read no more: its audio is not expected to grow.
+    if (early_ && current_ && early_->number == current_->number) return false;
     return asked_ && current_ && finals_.empty() && heard_ >= current_->read_to + (uint64_t) (kReadAgainAfter * rate_);
+}
+
+bool Assembly::early_due() const {
+    return early_ && !early_->started && finals_.empty();
 }
 
 void Assembly::send(const Event & e) {
@@ -399,7 +466,7 @@ void Assembly::release() {
 void Assembly::work() {
     std::unique_lock<std::mutex> lock(mutex_);
     for (;;) {
-        changed_.wait(lock, [&] { return closing_ || !finals_.empty() || reading_due(); });
+        changed_.wait(lock, [&] { return closing_ || !finals_.empty() || early_due() || reading_due(); });
         if (closing_) return;
         busy_ = true;
         if (!finals_.empty()) {
@@ -410,19 +477,30 @@ void Assembly::work() {
             Event e;
             e.utterance = f.number;
             try {
-                if (f.refused) std::rethrow_exception(f.refused);
-                std::optional<std::pair<std::vector<float>, int>> audio(std::make_pair(std::move(f.samples), rate_));
-                if (f.enhancement) {
-                    audio = enhancer_->enhance(*f.enhancement, std::move(audio->first), rate_, *cancellation);
-                    // The enhancement's place passes as soon as it has ended.
-                    f.enhancement.reset();
-                }
-                std::optional<Transcript> t;
-                if (audio) t = recognizer_.transcribe(*f.reservation, f.asked, std::move(audio->first), audio->second, *cancellation, f.number, false, f.draft);
-                if (t) {
-                    e.kind = Event::Kind::Completed;
-                    e.transcript = std::move(*t);
-                    e.duration = (double) f.length / rate_;
+                if (f.early) {
+                    // The worker ran the early recognition before it took this commit, which came after it.
+                    if (!f.early->done) throw std::logic_error("a commit took an early recognition still under way");
+                    if (f.early->failure) std::rethrow_exception(f.early->failure);
+                    if (f.early->transcript) {
+                        e.kind = Event::Kind::Completed;
+                        e.transcript = std::move(*f.early->transcript);
+                        e.duration = (double) f.length / rate_;
+                    }
+                } else {
+                    if (f.refused) std::rethrow_exception(f.refused);
+                    std::optional<std::pair<std::vector<float>, int>> audio(std::make_pair(std::move(f.samples), rate_));
+                    if (f.enhancement) {
+                        audio = enhancer_->enhance(*f.enhancement, std::move(audio->first), rate_, *cancellation);
+                        // The enhancement's place passes as soon as it has ended.
+                        f.enhancement.reset();
+                    }
+                    std::optional<Transcript> t;
+                    if (audio) t = recognizer_.transcribe(*f.reservation, f.asked, std::move(audio->first), audio->second, *cancellation, f.number, false, f.draft);
+                    if (t) {
+                        e.kind = Event::Kind::Completed;
+                        e.transcript = std::move(*t);
+                        e.duration = (double) f.length / rate_;
+                    }
                 }
             } catch (...) {
                 e.kind = Event::Kind::Failed;
@@ -452,6 +530,38 @@ void Assembly::work() {
                 waiting_.push_back({std::move(e), std::move(diarized), f.first, f.last});
                 release();
             }
+            changed_.notify_all();
+            continue;
+        }
+        if (early_due()) {
+            const std::shared_ptr<Early> early = early_;
+            early->started = true;
+            std::unique_ptr<Reservation> reservation;
+            try {
+                reservation = recognizer_.reserve(early->asked);
+            } catch (...) {
+                early->failure = std::current_exception();
+                early->done = true;
+                busy_ = false;
+                changed_.notify_all();
+                continue;
+            }
+            std::vector<float> samples = std::move(early->samples);
+            const std::shared_ptr<Cancellation> cancellation = early->cancellation = std::make_shared<Cancellation>();
+            lock.unlock();
+            std::optional<Transcript> t;
+            std::exception_ptr failure;
+            try {
+                t = recognizer_.transcribe(*reservation, early->asked, std::move(samples), rate_, *cancellation, early->number, false, early->draft);
+            } catch (...) {
+                failure = std::current_exception();
+            }
+            reservation.reset();
+            lock.lock();
+            early->transcript = std::move(t);
+            early->failure = failure;
+            early->done = true;
+            busy_ = false;
             changed_.notify_all();
             continue;
         }

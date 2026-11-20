@@ -170,8 +170,8 @@ and link `speech.lib`. Inside this CMake project, link the target `speech` (shar
   before it runs returns at once. Either returns `SPEECH_CANCELLED`.
 - **Detections of audio that arrives.** `speech_detection_start()` starts a detection with a request's options and the
   rate of the audio to come; `speech_detection_push()` gives it samples, `speech_detection_end()` ends the audio, and
-  `speech_detection_region_count()`, `speech_detection_region()` and `speech_detection_speaking()` read what it has found
-  so far ([below](#detections)).
+  `speech_detection_region_count()`, `speech_detection_region()`, `speech_detection_speaking()` and
+  `speech_detection_quiet()` read what it has found so far ([below](#detections)).
 - **Diarizations of audio that arrives.** `speech_diarization_start()`, `speech_diarization_push()` and
   `speech_diarization_end()` do the same with a diarization model, and `speech_diarization_segment_count()`,
   `speech_diarization_segment()`, `speech_diarization_settled()` and `speech_diarization_speaking()` read what it has
@@ -239,6 +239,10 @@ A detection finds the regions of audio that arrives a piece at a time, with a de
   `min_speech_duration_ms` makes no region, so the region under way is kept once its speech has lasted longer than that
   without falling silent: with the defaults, about 250 ms after it began, where a region is given only after the
   silence that ends it.
+- **`speech_detection_quiet()`** (API 4.3) says whether the region under way has fallen quiet, and the end, padded, that
+  it is given with if the silence lasts `min_silence_duration_ms` and no region starts within twice `speech_pad_ms` of
+  it. A caller can start on the region's audio while the silence goes on, before the region is certain; the server's
+  Realtime sessions recognize an utterance that way ([the Realtime API](server.md)).
 - **Any rate.** The audio is resampled to the model's rate a piece at a time, which holds back the last 4.3 ms of the
   audio pushed from 24, 44.1 or 48 kHz (8.6 ms from 8 kHz) until more arrives. The model computes a chunk (32 ms for
   Silero VAD) once its samples have arrived.
