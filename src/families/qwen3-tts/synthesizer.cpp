@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <random>
 #include <stdexcept>
 
@@ -10,6 +11,10 @@
 
 int chunk_frames(int sent) {
     return sent < 2 ? 1 : sent == 2 ? 2 : 4;
+}
+
+bool carries_sound(const std::vector<float> & audio) {
+    return std::any_of(audio.begin(), audio.end(), [](float sample) { return std::fabs(sample) > kSoundLevel; });
 }
 
 int text_token_limit(const ModelFile & m) {
@@ -101,8 +106,9 @@ SynthesisOutcome Synthesizer::synthesize(const SynthesisRequest & r, const Audio
     codec_.reset();
     std::vector<int32_t> history, frame(n_groups), pending;
     std::vector<float> audio;
+    // `chunks` counts the chunks passed since the first that carried sound; until then each chunk is one frame.
     int frames = 0, pending_frames = 0, chunks = 0;
-    bool stopped = false, ended = false;
+    bool stopped = false, ended = false, sounded = false;
 
     auto flush = [&]() {
         if (pending_frames == 0) return;
@@ -113,7 +119,8 @@ SynthesisOutcome Synthesizer::synthesize(const SynthesisRequest & r, const Audio
         }
         pending.clear();
         pending_frames = 0;
-        chunks++;
+        sounded = sounded || carries_sound(audio);
+        if (sounded) chunks++;
         if (!sink(audio.data(), audio.size())) stopped = true;
     };
 
@@ -142,7 +149,7 @@ SynthesisOutcome Synthesizer::synthesize(const SynthesisRequest & r, const Audio
         pending.insert(pending.end(), frame.begin(), frame.end());
         pending_frames++;
         frames++;
-        if (pending_frames == chunk_frames(chunks)) flush();
+        if (pending_frames == (sounded ? chunk_frames(chunks) : 1)) flush();
         if (stopped) break;
         Timer t{&st.talker};
         talker_.step(frame.data(), prompt.frame_extra);

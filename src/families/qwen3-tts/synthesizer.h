@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "codec.h"
 #include "model-file.h"
@@ -52,7 +53,8 @@ int text_token_limit(const ModelFile & m);
 using AudioSink = std::function<bool(const float * samples, size_t n)>;
 
 /**
- * The frames of the chunk of audio a synthesis passes after `sent` chunks: 1, 1, 2 and then 4.
+ * The frames of the chunk of audio a synthesis passes after `sent` chunks that carried sound: 1, 1, 2 and then 4. The
+ * chunks before the first sound are a frame each (kSoundLevel).
  *
  * The first chunk is the first frame alone, so that audio starts once one frame is made. With 4 frames in every chunk
  * after it, as speech.cpp 0.7.1 sent them, the second chunk of the 1.7B model arrived 0.096 s after the first on an
@@ -65,6 +67,17 @@ using AudioSink = std::function<bool(const float * samples, size_t n)>;
  * frames are grouped into calls, and the same request with the same seed gives the same samples.
  */
 int chunk_frames(int sent);
+
+/**
+ * The level above which a sample of a chunk is sound, about -54 dBFS. Qwen3-TTS begins most speech with a few frames of
+ * near-silence (0.43 s for the 0.6B model's every sentence), so a chunk below it is a frame alone, and chunk_frames()
+ * counts its chunks from the first that carries sound: a player that skips the silence gets the first sound once its
+ * frame is made, not once the frames of a longer chunk are.
+ */
+constexpr float kSoundLevel = 64.0f / 32768.0f;
+
+/** Whether a chunk's audio has a sample above kSoundLevel. */
+bool carries_sound(const std::vector<float> & audio);
 
 /** Text in, audio out: the tokenizer, the talker, the code predictor and the codec decoder of one model file together. */
 class Synthesizer {
